@@ -1,0 +1,178 @@
+---
+title: "VIM package: imputation examples"
+output: html_document
+date: "2025-06-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(message = FALSE)
+```
+
+### Install and load library
+
+The `transformerImpute()` function sits inside the transformerImpute branch in the VIM github repository (<https://github.com/statistikat/VIM/tree/transformerImpute>). We install the VIM version respective to the transformerImpute branch and load it.
+
+```{r loadVIM}
+# load VIM package (transformer branch)
+devtools::install_github("statistikat/VIM", ref = "transformerImpute")
+library(VIM)
+```
+
+### Test data
+
+To demonstrate our imputation methods, we use the Iris data set.
+
+```{r iris}
+dim(iris)
+str(iris)
+summary(iris)
+```
+
+#### Create missing values
+
+We artificially inject missing values into the data, following three different missing mechanisms:
+
+1.  Missing Completely At Random **(MCAR)**: The probability of a value missing is completely unrelated to any data.
+
+2.  Missing At Random **(MAR)**: The probability of missingness depends on observed variables, but not the missing variable itself.
+
+3.  Missing Not At Random **(MNAR)**: The probability of missingness depends on the missing value itself.
+
+For this, we implemented a function for each missing mechanism (see `create_missings_function.R`)
+
+The output of these functions will be the input data set, with missing value in the `miss_var`. Addditinoally we add the column `<miss_var>_TRUE`, which saves the original column values before missing value injection.
+
+In addition to the parameters `dat` (input data), `miss_var` (variable to inject missings to) and `rate_missing` (rate of values missing), the functions `mar()` and `mnar()` take as argunemt `tab_list`, which is a named list of data tables giving the probability of non-response according to each variable value in the variable. The default non-response value is always 1. For variable values that are more likely to cause missingness, the non-response value will be \>1.
+
+##### MCAR
+
+First we start with MCAR. The missing variable is *Species.*
+
+```{r}
+source("create_missings_functions.R")
+iris <- as.data.table(iris)
+iris_mcar <- mcar(iris, "Species",rate_missing = 0.2)
+sapply(iris_mcar,function(x) sum(is.na(x)))
+```
+
+##### MAR
+
+Next we inject MAR. For this, we first have to create the `tab_list`. For this, we say that missing values for Species is more likely for larger *Sepal.Width* and lower values of *Petal.Length*.
+
+```{r}
+#find distinct values and counts
+tab_Petal.Length <- iris[,.N,by=Petal.Length]
+# default non_res value is 1
+tab_Petal.Length[,non_res:=1]
+# for values < 3, the non response increases
+tab_Petal.Length[Petal.Length<3, non_res:=1.5]
+tab_Petal.Length[Petal.Length<1.5,non_res:=2]
+
+tab_Sepal.Width <- iris[,.N,by=Sepal.Width]
+tab_Sepal.Width[,non_res:=1]
+tab_Sepal.Width[Sepal.Width>3.5,non_res:=1.3]
+tab_Sepal.Width[Sepal.Width>=4,non_res:=1.6]
+
+tab_list <- list(Petal.Length = tab_Petal.Length,
+                 Sepal.Width = tab_Sepal.Width)
+tab_list
+```
+
+```{r}
+iris_mar <- mar(iris, "Species", tab_list, rate_missing = 0.2)
+```
+
+##### MNAR
+
+Lastly, we look at MNAR. We reuse the `tab_list` from the MAR generation, but add higher non-response for *Species* = setosa.
+
+```{r}
+tab_Species <- iris[,.N,by=Species]
+tab_Species[,non_res:=1]
+tab_Species[Species=="setosa",non_res:=1.5]
+tab_list$Species <- tab_Species
+tab_list$Species
+```
+
+```{r}
+iris_mnar <- mnar(iris, "Species", tab_list, rate_missing = 0.2)
+```
+
+### Imputation
+
+#### Transformer
+
+We use the `transformerImpute()` function from the VIM transformerImpute branch to impute the missing values for all three data sets. For this, we leave all model hyperparameter as their default values.
+
+Note that at this point, the function can only impute one variable at a time.
+
+```{r impmcar, warning=FALSE}
+imp_mcar <- transformerImpute(data = iris_mcar,
+                              target = "Species", #variable to impute
+                              cat_vars = "Species", #categorical variables
+                              imp_col = TRUE, #add an imputation indicator column
+                              include_cols = c("Sepal.Length","Sepal.Width","Petal.Length", "Petal.Width","Species"),
+                              verbose = 0, #turn of training updates
+                              epochs = 50)
+
+# add the true species values
+imp_mcar[,Species_TRUE:=iris_mcar$Species_TRUE]
+```
+
+```{r impmar, warning=FALSE}
+imp_mar <- transformerImpute(data = iris_mar,
+                              target = "Species", #variable to impute
+                              cat_vars = "Species", #categorical variables
+                              imp_col = TRUE, #add an imputation indicator column
+                              include_cols = c("Sepal.Length","Sepal.Width","Petal.Length", "Petal.Width","Species"),
+                             verbose = 0,
+                             epochs = 50)
+
+# add the true species values
+imp_mar[,Species_TRUE:=iris_mar$Species_TRUE]
+```
+
+```{r impmnar, warning=FALSE}
+imp_mnar <- transformerImpute(data = iris_mnar,
+                              target = "Species", #variable to impute
+                              cat_vars = "Species", #categorical variables
+                              imp_col = TRUE, #add an imputation indicator column
+                              include_cols = c("Sepal.Length","Sepal.Width","Petal.Length", "Petal.Width","Species"),
+                              verbose = 0,
+                              epochs = 50)
+
+# add the true species values
+imp_mnar[,Species_TRUE:=iris_mnar$Species_TRUE]
+```
+
+### Evaluation
+Now we evaluate the performance and compare them for the different missing mechanism 
+```{r evaluate}
+dat_eval <- data.table(orig_values = iris$Species, 
+                       value_mcar = imp_mcar$Species, imp_mcar = imp_mcar$imp,
+                       value_mar = imp_mar$Species, imp_mar = imp_mar$imp,
+                       value_mnar = imp_mnar$Species, imp_mnar = imp_mnar$imp)
+
+dat_eval[,acc_mcar:=0]
+dat_eval[,acc_mar:=0]
+dat_eval[,acc_mnar:=0]
+
+dat_eval[imp_mcar==1&orig_values==value_mcar,acc_mcar:=1]
+dat_eval[imp_mar==1&orig_values==value_mar,acc_mar:=1]
+dat_eval[imp_mnar==1&orig_values==value_mnar,acc_mnar:=1]
+
+dat_eval[imp_mcar==0, acc_mcar:=NA]
+dat_eval[imp_mar==0, acc_mar:=NA]
+dat_eval[imp_mnar==0, acc_mnar:=NA]
+
+mean(dat_eval$acc_mcar,na.rm = T)
+mean(dat_eval$acc_mar,na.rm = T)
+mean(dat_eval$acc_mnar,na.rm = T)
+```
+
+
+
+
+
+
